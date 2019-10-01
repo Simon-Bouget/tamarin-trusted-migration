@@ -59,7 +59,7 @@ rule Cert_Cloud_Request_TT:
       m = <payload, sign(payload,sk_aik), pk(~k_bind), ~TAL>
   in
   [ !Cloud(Cloud), !PTAA(PTAA), !Ltk(Cloud, sk_aik), !Bind(Cloud, ~k_bind), Fr(~TAL)  ]
---[Requested_TT(Cloud, ~k_bind), OnlyOneTT(Cloud), Locked(Cloud, ~k_bind, ~TAL)]->
+--[Requested_TT(Cloud, ~k_bind), OnlyOneTT(Cloud), Locked(Cloud, ~k_bind, ~TAL), RunningNI(Cloud, PTAA, <'ptaa', 'cloud', pk(~k_bind)>)]->
   [ Out_S(Cloud, PTAA, m), Cloud_requested_TT(Cloud, ~k_bind) ]
 
 rule Cert_PTAA_Reply:
@@ -68,7 +68,7 @@ rule Cert_PTAA_Reply:
       m = <payload, TT>
   in
   [In_S(Cloud, PTAA, <payload_in, sig, pk_bind, TAL>), !Pk(Cloud,pk_aik), !Ltk(PTAA, sk_ptaa), Fr(~TT_id)]
---[Eq(verify(sig,payload_in,pk_aik), true),Replied_TT(PTAA, pk_bind)]-> 
+--[Eq(verify(sig,payload_in,pk_aik), true),Replied_TT(PTAA, pk_bind), CommitNI(PTAA, Cloud, <'ptaa', 'cloud', pk_bind>) ]-> 
   [Out_S(Cloud, PTAA, m)]
 
 rule Cert_Cloud_Complete:
@@ -236,6 +236,13 @@ lemma injectiveagreement:
         Running(B,A,t) @j& j < i
       & not (Ex A2 B2 #i2. Commit(A2,B2,t) @i2 
                          & not (#i2 = #i)))
+  "
+
+lemma noninjective_agreement:
+  "All a b t #i.
+    CommitNI(a,b,t) @i ==> 
+      (Ex #j.
+        RunningNI(b,a,t) @j)
   "
 
 
