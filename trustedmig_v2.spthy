@@ -1,0 +1,346 @@
+theory trustedmig
+
+begin
+
+builtins: signing, asymmetric-encryption, symmetric-encryption
+
+
+/* PKI */
+
+rule Generate_master_key_pair:
+  [ Fr(~x) ]
+--[OnlyOneMasterKeyPair($A)]->
+  [ !Pk($A,pk(~x)), Out(pk(~x)), !Ltk($A,~x) ]
+
+
+/* Channel rules */
+
+rule ChanOut_S:
+  [ Out_S($A,$B,x) ]
+--[ ChanOut_S($A,$B,x) ]->
+  [ !Sec($A,$B,x) ]
+
+rule ChanIn_S:
+  [ !Sec($A,$B,x) ]
+--[ ChanIn_S($A,$B,x) ]->
+  [ In_S($A,$B,x) ]
+
+
+/*
+Initialization Rules
+*/
+
+rule Init_Cloud:
+  [ Fr(~id), !Ltk(C, ltkC)]
+--[ Create(C, ~id), Role('Cloud'), OnlyOneInit(C) ]->
+  [ !Cloud(C) ]
+
+rule Init_PTAA:
+  [ Fr(~id), !Ltk(PTAA, ltkPTAA)]
+--[ Create(PTAA, ~id), Role('PTAA'), OnlyOneInit(PTAA) ]->
+  [ !PTAA(PTAA) ]
+
+
+/*
+TPM
+*/
+
+rule Generate_K_bind:
+  [ !Cloud(Cloud), Fr(~k_bind) ]
+-->
+  [ !Bind(Cloud, ~k_bind)]
+
+/*
+Certification
+*/
+
+rule Cert_Cloud_Request_TT:
+  let payload = <'PCR', pk(~sk_bind)>
+      m = <payload, sign(payload,sk_aik), ~TAL>
+//      m = aenc(<payload, sign(payload,sk_aik), ~TAL>, pk_ptaa)
+  in
+  [ !Cloud(Cloud), !PTAA($PTAA), !Pk($PTAA, pk_ptaa), !Ltk(Cloud, sk_aik), !Bind(Cloud, ~sk_bind), Fr(~TAL)  ]
+--[OUT_Cert_Cloud_Request( m ), Requested_TT(Cloud, ~sk_bind), OnlyOneTT(Cloud), Locked(Cloud, ~sk_bind, ~TAL), RunningNI(Cloud, <'ptaa', 'cloud', pk(~sk_bind)>)]->
+  [ Out( m ), Cloud_requested_TT(Cloud, $PTAA, ~sk_bind) ]
+
+rule Cert_PTAA_Reply:
+  let TT_data = <~TT_id, Cloud, TAL, pk_bind, 'T'>
+      TT_sig = sign(TT_data, sk_ptaa)
+      TT = <TT_data, TT_sig>
+      payload = <'PCR', pk_bind>
+      m_in = <payload, sig, TAL>
+//      m_in = aenc( <payload, sig, TAL>, pk(sk_ptaa) )
+  in
+  [In( m_in ), !Pk(Cloud,pk_aik), !Ltk(PTAA, sk_ptaa), Fr(~TT_id)]
+--[IN_Cert_PTAA_Reply( sk_ptaa, m_in ), Eq(verify(sig,payload,pk_aik), true),Replied_TT(PTAA, pk_bind), CommitNI(Cloud, <'ptaa', 'cloud', pk_bind>)]->   //TODO: ensure Ltk(cloud) and pk_aik are consistent with each other
+  [Out( TT )]
+
+rule Cert_Cloud_Complete:
+  let TT_data = <TT_id, Cloud, TAL, pk_bind, 'T'>
+      TT = < TT_data, TT_sig >
+  in
+  [ Cloud_requested_TT(Cloud, PTAA, sk_bind), In( TT ), !Pk(PTAA, pk_ptaa) ]
+--[ Cloud_certified(Cloud), Eq(pk_bind, pk(sk_bind)), Eq(verify(TT_sig, TT_data, pk_ptaa), true), Secret(sk_bind) ]->  
+  [ !TT(Cloud, TT) ]   //TODO: publish the token publicly
+ // [ !TT(Cloud, TT_id, k_bind, TT) ]
+
+
+
+/*
+FAKE CERT: DO NOT USE IN FINAL VERSION, DEBUGGING ONLY 
+
+
+rule Fake_Cert:
+let payload_B = <~TT_id, Cloud, TAL, pk(~k_bind), 'T'>
+    TT = sign(payload_B, sk_ptaa)
+in
+  [ Fr(~TT_id), Fr(~k_bind), !PTAA($PTAA), !Ltk($PTAA, sk_ptaa) ]
+-->
+  [ !TT(Cloud, ~TT_id, ~k_bind, TT), !Out(~TT_id) ]   //TODO: replicate the "Out" in the real rule
+*/
+
+
+/*
+Migration
+*/
+
+rule Mig_S_start:
+  let TTs_data = <TTs_id, $S, TALs, pk_bindS, 'T'>
+      TTs = < TTs_data, TTs_sig >
+      payload = <'request_TTd', TTs>
+	m = payload
+    //  m = aenc(< payload, sign(payload, sk_S) >, pk_D)    //TODO
+    //  m = < payload, sign(payload, sk_S) >
+  in 
+  [ !Cloud($S), !Cloud($D), !TT($S, TTs), !Ltk($S, sk_S), !Pk($D, pk_D), Fr(~VM_id) ]
+--[OUT_Mig_S_start(m)]->   // , OnlyOnceVX($S,$D, TTs_id,k_bindS,TTs, sk_S, pk_D)
+  [ Out(m), S_requested_mig($S,$D, TTs_id, ~VM_id) ]
+
+rule Mig_D_reply:
+  let 
+//	TTs_real = sign(truc, sk_ptaa)
+
+      TTs_data = <TTs_id, S, TALs, pk(sk_bindS), 'T'>
+      TTs_sig = sign(TTs_data, sk_ptaa)
+      TTs = < TTs_data, TTs_sig >
+      TTd_data = <TTd_id, D, TALd, pk(sk_bindD), 'T'>
+      TTd = < TTd_data, TTd_sig >
+
+      payload = <'request_TTd', TTs>
+	sig = sign(payload, sk_S)
+//      m_in = < payload, sig >
+	m_in = payload
+      m = < TTd, aenc{~N}pk(sk_bindS) >
+  in
+  [ In(m_in), !TT(D, TTd), !TT(S, TTs), !Ltk(D, sk_D), !PTAA($PTAA), !Pk($PTAA, pk(sk_ptaa)), Fr(~N), !Pk(S, pk(sk_S)) ]
+--[IN_Mig_D_reply(sk_ptaa, m_in), OUT_Mig_D_reply(m) , Eq( verify(TTs_sig, TTs_data , pk(sk_ptaa)), true ), Replied(D), Eq( verify(sig, payload, pk(sk_S)), true) ]->   
+  [ Out(m), D_replied(S, D, TTs_id, TTd_id, ~N, pk(sk_bindD)) ]
+
+
+rule Mig_S_send_VM:
+  let TTd_data = <TTd_id, D, TALd, pk_bindD, 'T'>
+      TTd_sig = sign(TTd_data, sk_ptaa)
+      TTd = < TTd_data, TTd_sig >
+      m_in = < TTd, aenc{N}pk(sk_bindS) >
+      VM_snapshot = < VM_id, ~VM_data >
+      m = < senc(<VM_snapshot, N>, ~Km), aenc{~Km}pk_bindD >
+  in
+  [ S_requested_mig(S, D, TTs_id, VM_id), In( m_in ), Fr(~VM_data), Fr(~Km), !PTAA($PTAA), !Pk($PTAA, pk(sk_ptaa)), !Bind(S, sk_bindS)  ]
+--[OUT_Mig_S_send_VM(m), IN_Mig_S_send_VM(N, m_in), Eq(verify(TTd_sig, TTd_data, pk(sk_ptaa)), true), Secret(~VM_data) ]->      //TODO: check TAL + check SK_bind
+  [ Out( m ), S_sent_VM(S, D, TTs_id, TTd_id, N, ~VM_data, VM_id, pk_bindD) ]
+
+
+rule Mig_D_notif_success:
+  let VM_snapshot = < VM_id, VM_data >
+      payload = senc(<VM_snapshot, N>, ~Km)
+      m_in = < payload, Km_cypher >
+      Km = adec(Km_cypher, sk_bindD)
+	data = sdec(payload, Km)
+	m = < fst(fst(data)), TTs_id, TTd_id, 'T' >
+      sig = sign(m, sk_d)
+	m_out = aenc{< m, sig >}pk(sk_S)
+  in 
+  [ D_replied(S, D, TTs_id, TTd_id, N, pk_bindD), In( m_in ), !Bind(D, sk_bindD) , !Ltk(D, sk_d), !Pk(S, pk(sk_S)) ]
+--[IN_Mig_D_notif_success(Km_cypher, N, VM_id, m_in), OUT_Mig_D_notif_success(m_out),
+   Secret(VM_data),
+  // Commit(D, S, <'destination', 'source', VM_data>),
+   Running(D, S, <'source', 'destination', VM_data, TTd_id,pk_bindD>)
+  ]->   //TODO: check SK_bind, check N
+  [ Out( m_out ) ]
+
+rule Mig_end:
+  let m = < VM_id, TTs_id, TTd_id, 'T' >
+      m_in = aenc{< m, sig >}pk(sk_S)
+  in
+  [ S_sent_VM(S, D, TTs_id, TTd_id, N, VM_data, VM_id, pk_bindD), In( m_in ), !Pk(D,pk_d), !Ltk(S, sk_S) ]
+--[Complete(VM_id), IN_Mig_end(VM_id, m_in), Eq(verify(sig,m,pk_d),true), 
+   Secret(VM_data),
+   Commit(S, D, <'source', 'destination', VM_data, TTd_id, pk_bindD>)
+  ]->
+  []
+
+/* 
+Restrictions
+*/
+
+restriction OnlyOneInit:
+  "
+  All #i #j x. OnlyOneInit(x)@#i & OnlyOneInit(x)@#j ==> #i = #j
+  "
+
+restriction OnlyOneMasterKeyPair:
+  "
+  All #i #j x. OnlyOneMasterKeyPair(x)@#i & OnlyOneMasterKeyPair(x)@#j ==> #i = #j
+  "
+restriction OnlyOneTT:
+  "
+  All #i #j x. OnlyOneTT(x)@#i & OnlyOneTT(x)@#j ==> #i = #j
+  "
+
+
+restriction OnlyOnceVX:
+  "
+  All #i #j S D TTs_id k_bindS TTs sk_S pk_D . OnlyOnceVX(S,D, TTs_id,k_bindS,TTs, sk_S, pk_D)@i & OnlyOnceVX(S,D, TTs_id,k_bindS,TTs, sk_S, pk_D)@j ==> #i = #j
+  "
+
+
+restriction Equality:
+  "All x y #i. Eq(x,y) @i ==> x = y"
+
+
+
+// -------------------- Sanity Check Lemmas -------------------- //
+
+lemma end_exist:
+  exists-trace
+  "
+    Ex snap #t. (Complete(snap)@t)
+  "
+
+lemma certif_exist:
+  exists-trace
+  "
+    Ex C #t. ( Cloud_certified(C)@t )
+  "
+
+lemma L1:
+  exists-trace
+  "
+    Ex C k #t. ( Requested_TT(C,k)@t )
+  "
+lemma L2:
+  exists-trace
+  "
+    Ex PTAA k #t. ( Replied_TT(PTAA, k)@t )
+  "
+lemma L3:
+  exists-trace
+  "
+    Ex D #t. ( Replied(D)@t )
+  "
+
+lemma S1:
+  exists-trace
+  "
+    Ex m #t. ( OUT_Mig_S_start(m)@t )
+  "
+lemma D1:
+  exists-trace
+  "
+    Ex m #t. ( OUT_Mig_D_reply(m)@t )
+  "
+lemma S2:
+  exists-trace
+  "
+    Ex m #t. ( OUT_Mig_S_send_VM(m)@t )
+  "
+lemma D2:
+  exists-trace
+  "
+    Ex m #t. ( OUT_Mig_D_notif_success(m)@t )
+  "
+
+//__________Security Lemmas________//
+
+lemma secrecy:
+  "All x #i.Secret(x) @i ==> not (Ex #j. K(x)@j)"
+
+
+lemma injectiveagreement:
+  "All A B t #i.
+    Commit(A,B,t) @i ==> 
+      (Ex #j. 
+        Running(B,A,t) @j& j < i
+      & not (Ex A2 B2 #i2. Commit(A2,B2,t) @i2 
+                         & not (#i2 = #i)))
+    | (Ex C #r. Reveal(C)@r & Honest(C) @i)"
+
+
+lemma noninjective_agreement:
+  "All b t #i.
+    CommitNI(b,t) @i ==> 
+      (Ex #j.
+        RunningNI(b,t) @j)
+  "
+
+
+
+//TODO: check if all are still needed / compare with / without encryption wrapping the messages
+
+lemma types [sources]:
+  " (All Km_cypher N VM_id m_in #i.
+       IN_Mig_D_notif_success(Km_cypher, N, VM_id, m_in)@i
+       ==> (
+         (Ex #j #k #l. KU(Km_cypher)@j & j < i & KU(N)@k & k < i & KU(VM_id)@l & l < i)
+        |(Ex #j. OUT_Mig_S_send_VM(m_in)@j)
+       )
+     )
+   &(All N m_in #i.
+       IN_Mig_S_send_VM(N, m_in)@i
+       ==> (
+         (Ex #j. KU(N)@j & j < i)
+        |(Ex #j. OUT_Mig_D_reply(m_in)@j & j < i)
+       )
+     )
+   &(All sk_S m_in #i.
+       IN_Mig_D_reply(sk_S, m_in)@i
+       ==> (
+         (Ex #j. KU(sk_S)@j & j < i)
+        |(Ex #j. OUT_Mig_S_start(m_in)@j & j < i)
+       )
+     )
+  "
+ 
+
+end
+
+
+/*
+     (All VM_id m_in #i.
+       IN_Mig_end(VM_id, m_in)@i
+       ==> (
+         (Ex #j. KU(VM_id)@j & j < i)
+        |(Ex #j. OUT_Mig_D_notif_success(m_in)@j)
+       )
+     )
+   &
+   &(All sk_S sk_ptaa m_in #i.
+       IN_Mig_D_reply(sk_ptaa, m_in)@i
+       ==> (
+         (Ex #k. KU(sk_ptaa)@k & k < i )
+        |(Ex #j. OUT_Mig_S_start(m_in)@j & j < i)
+       )
+     )
+
+
+   &(All sk_ptaa m #i.
+       IN_Cert_PTAA_Reply( sk_ptaa, m )@i
+       ==> (
+         (Ex #j. KU(sk_S)@j & j < i)
+        |(Ex #j. OUT_Cert_Cloud_Request( m )@j & j < i)
+       )
+     )
+
+
+*/
+
